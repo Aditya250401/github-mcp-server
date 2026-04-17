@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/github/github-mcp-server/pkg/authsec"
 	ghcontext "github.com/github/github-mcp-server/pkg/context"
 	"github.com/github/github-mcp-server/pkg/github"
 	"github.com/github/github-mcp-server/pkg/http/oauth"
@@ -91,6 +92,12 @@ type ServerConfig struct {
 
 	// InsidersMode indicates if we should enable experimental features.
 	InsidersMode bool
+
+	// AuthSec, when non-nil and valid, enables AuthSec-backed token validation.
+	// Incoming bearer tokens are introspected against AuthSec and swapped for
+	// AuthSec.UpstreamGitHubToken before downstream GitHub API calls. OAuth
+	// Protected Resource Metadata advertises AuthSec.Issuer as the AS.
+	AuthSec *authsec.Config
 }
 
 func RunHTTPServer(cfg ServerConfig) error {
@@ -160,11 +167,31 @@ func RunHTTPServer(cfg ServerConfig) error {
 		ScopesSupported:        oauth.SupportedScopes,
 		BearerMethodsSupported: []string{"header"},
 	}
+	// When AuthSec is enabled, point PRM at AuthSec and advertise AuthSec-side
+	// scopes instead of raw GitHub OAuth scopes.
+	if cfg.AuthSec.Enabled() {
+		oauthCfg.AuthorizationServer = cfg.AuthSec.Issuer
+		if len(cfg.AuthSec.RequiredScopes) > 0 {
+			oauthCfg.ScopesSupported = append([]string(nil), cfg.AuthSec.RequiredScopes...)
+		}
+	}
 
 	serverOptions := []HandlerOption{}
 	if cfg.ScopeChallenge {
 		scopeFetcher := scopes.NewFetcher(apiHost, scopes.FetcherOptions{})
 		serverOptions = append(serverOptions, WithScopeFetcher(scopeFetcher))
+	}
+	// Install AuthSec token extractor if configured.
+	if cfg.AuthSec.Enabled() {
+		extractor, err := authsec.NewTokenExtractor(cfg.AuthSec, logger)
+		if err != nil {
+			return fmt.Errorf("failed to create AuthSec token extractor: %w", err)
+		}
+		serverOptions = append(serverOptions, WithTokenExtractor(extractor))
+		logger.Info("AuthSec token validation enabled",
+			"issuer", cfg.AuthSec.Issuer,
+			"resource_uri", cfg.AuthSec.ResourceURI,
+			"resource_server_id", cfg.AuthSec.ResourceServerID)
 	}
 
 	r := chi.NewRouter()

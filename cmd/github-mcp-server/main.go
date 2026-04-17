@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/github/github-mcp-server/internal/ghmcp"
+	"github.com/github/github-mcp-server/pkg/authsec"
 	"github.com/github/github-mcp-server/pkg/github"
 	ghhttp "github.com/github/github-mcp-server/pkg/http"
 	"github.com/spf13/cobra"
@@ -128,6 +129,13 @@ var (
 			}
 
 			ttl := viper.GetDuration("repo-access-cache-ttl")
+
+			// AuthSec: either from flags or from AUTHSEC_* env vars.
+			authsecCfg, err := buildAuthSecConfig()
+			if err != nil {
+				return fmt.Errorf("authsec config: %w", err)
+			}
+
 			httpConfig := ghhttp.ServerConfig{
 				Version:              version,
 				Host:                 viper.GetString("host"),
@@ -147,6 +155,7 @@ var (
 				DynamicToolsets:      viper.GetBool("dynamic_toolsets"),
 				ExcludeTools:         excludeTools,
 				InsidersMode:         viper.GetBool("insiders"),
+				AuthSec:              authsecCfg,
 			}
 
 			return ghhttp.RunHTTPServer(httpConfig)
@@ -182,6 +191,15 @@ func init() {
 	httpCmd.Flags().String("base-path", "", "Externally visible base path for the HTTP server (for OAuth resource metadata)")
 	httpCmd.Flags().Bool("scope-challenge", false, "Enable OAuth scope challenge responses")
 
+	// AuthSec third-party OAuth provider flags (env equivalents prefixed AUTHSEC_*)
+	httpCmd.Flags().String("authsec-issuer", "", "AuthSec base URL (enables AuthSec-backed token validation)")
+	httpCmd.Flags().String("authsec-resource-uri", "", "AuthSec resource_uri (audience) for this MCP server")
+	httpCmd.Flags().String("authsec-resource-server-id", "", "AuthSec resource_server_id (UUID) — used as introspection client_id")
+	httpCmd.Flags().String("authsec-introspection-secret", "", "AuthSec introspection secret (sec_...)")
+	httpCmd.Flags().String("authsec-introspection-url", "", "Override AuthSec introspection URL (defaults to issuer + /oauth/introspect)")
+	httpCmd.Flags().String("authsec-upstream-github-token", "", "Upstream GitHub PAT used to call api.github.com after AuthSec token is validated")
+	httpCmd.Flags().StringSlice("authsec-required-scopes", nil, "If set, AuthSec token must carry at least one of these scopes")
+
 	// Bind flag to viper
 	_ = viper.BindPFlag("toolsets", rootCmd.PersistentFlags().Lookup("toolsets"))
 	_ = viper.BindPFlag("tools", rootCmd.PersistentFlags().Lookup("tools"))
@@ -201,6 +219,13 @@ func init() {
 	_ = viper.BindPFlag("base-url", httpCmd.Flags().Lookup("base-url"))
 	_ = viper.BindPFlag("base-path", httpCmd.Flags().Lookup("base-path"))
 	_ = viper.BindPFlag("scope-challenge", httpCmd.Flags().Lookup("scope-challenge"))
+	_ = viper.BindPFlag("authsec-issuer", httpCmd.Flags().Lookup("authsec-issuer"))
+	_ = viper.BindPFlag("authsec-resource-uri", httpCmd.Flags().Lookup("authsec-resource-uri"))
+	_ = viper.BindPFlag("authsec-resource-server-id", httpCmd.Flags().Lookup("authsec-resource-server-id"))
+	_ = viper.BindPFlag("authsec-introspection-secret", httpCmd.Flags().Lookup("authsec-introspection-secret"))
+	_ = viper.BindPFlag("authsec-introspection-url", httpCmd.Flags().Lookup("authsec-introspection-url"))
+	_ = viper.BindPFlag("authsec-upstream-github-token", httpCmd.Flags().Lookup("authsec-upstream-github-token"))
+	_ = viper.BindPFlag("authsec-required-scopes", httpCmd.Flags().Lookup("authsec-required-scopes"))
 	// Add subcommands
 	rootCmd.AddCommand(stdioCmd)
 	rootCmd.AddCommand(httpCmd)
@@ -218,6 +243,55 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+}
+
+// buildAuthSecConfig assembles the AuthSec config from CLI flags (via viper) and
+// falls back to AUTHSEC_* env vars. Returns (nil, nil) when nothing is set.
+func buildAuthSecConfig() (*authsec.Config, error) {
+	// Start from env (if any), then override with flags.
+	cfg, envErr := authsec.ConfigFromEnv()
+	if cfg == nil {
+		cfg = &authsec.Config{}
+	}
+
+	if v := viper.GetString("authsec-issuer"); v != "" {
+		cfg.Issuer = v
+	}
+	if v := viper.GetString("authsec-resource-uri"); v != "" {
+		cfg.ResourceURI = v
+	}
+	if v := viper.GetString("authsec-resource-server-id"); v != "" {
+		cfg.ResourceServerID = v
+	}
+	if v := viper.GetString("authsec-introspection-secret"); v != "" {
+		cfg.IntrospectionSecret = v
+	}
+	if v := viper.GetString("authsec-introspection-url"); v != "" {
+		cfg.IntrospectionURL = v
+	}
+	if v := viper.GetString("authsec-upstream-github-token"); v != "" {
+		cfg.UpstreamGitHubToken = v
+	}
+	if viper.IsSet("authsec-required-scopes") {
+		var scopes []string
+		if err := viper.UnmarshalKey("authsec-required-scopes", &scopes); err == nil {
+			cfg.RequiredScopes = scopes
+		}
+	}
+
+	// If nothing was provided at all → not configured.
+	if cfg.Issuer == "" && cfg.ResourceURI == "" && cfg.ResourceServerID == "" && cfg.IntrospectionSecret == "" {
+		return nil, nil
+	}
+	// If partial (env had some, flags filled rest), validate once more.
+	if err := cfg.Validate(); err != nil {
+		// Prefer surfacing the env error if present (more specific).
+		if envErr != nil {
+			return nil, envErr
+		}
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func wordSepNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
