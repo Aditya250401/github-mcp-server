@@ -272,10 +272,31 @@ type RequestDeps struct {
 	ContentWindowSize int
 
 	// Feature flag checker for runtime checks
-	featureChecker inventory.FeatureFlagChecker
+	featureChecker        inventory.FeatureFlagChecker
+	upstreamTokenResolver UpstreamTokenResolver
 
 	// Observability exporters (includes logger)
 	obsv observability.Exporters
+}
+
+type UpstreamTokenResolver interface {
+	ResolveUpstreamToken(ctx context.Context) (string, error)
+}
+
+type UpstreamTokenResolverFunc func(ctx context.Context) (string, error)
+
+func (f UpstreamTokenResolverFunc) ResolveUpstreamToken(ctx context.Context) (string, error) {
+	return f(ctx)
+}
+
+type RequestDepsOption func(*RequestDeps)
+
+func WithUpstreamTokenResolver(resolver UpstreamTokenResolver) RequestDepsOption {
+	return func(d *RequestDeps) {
+		if resolver != nil {
+			d.upstreamTokenResolver = resolver
+		}
+	}
 }
 
 // NewRequestDeps creates a RequestDeps with the provided clients and configuration.
@@ -288,8 +309,9 @@ func NewRequestDeps(
 	contentWindowSize int,
 	featureChecker inventory.FeatureFlagChecker,
 	obsv observability.Exporters,
+	options ...RequestDepsOption,
 ) *RequestDeps {
-	return &RequestDeps{
+	deps := &RequestDeps{
 		apiHosts:          apiHosts,
 		version:           version,
 		lockdownMode:      lockdownMode,
@@ -297,18 +319,36 @@ func NewRequestDeps(
 		T:                 t,
 		ContentWindowSize: contentWindowSize,
 		featureChecker:    featureChecker,
-		obsv:              obsv,
+		upstreamTokenResolver: UpstreamTokenResolverFunc(func(ctx context.Context) (string, error) {
+			if upstreamToken, ok := ghcontext.GetUpstreamToken(ctx); ok && upstreamToken != nil && upstreamToken.Token != "" {
+				return upstreamToken.Token, nil
+			}
+
+			tokenInfo, ok := ghcontext.GetTokenInfo(ctx)
+			if !ok || tokenInfo == nil || tokenInfo.Token == "" {
+				return "", fmt.Errorf("no upstream token available in context")
+			}
+
+			return tokenInfo.Token, nil
+		}),
+		obsv: obsv,
 	}
+
+	for _, option := range options {
+		if option != nil {
+			option(deps)
+		}
+	}
+
+	return deps
 }
 
 // GetClient implements ToolDependencies.
 func (d *RequestDeps) GetClient(ctx context.Context) (*gogithub.Client, error) {
-	// extract the token from the context
-	tokenInfo, ok := ghcontext.GetTokenInfo(ctx)
-	if !ok {
-		return nil, fmt.Errorf("no token info in context")
+	token, err := d.resolveUpstreamToken(ctx)
+	if err != nil {
+		return nil, err
 	}
-	token := tokenInfo.Token
 
 	baseRestURL, err := d.apiHosts.BaseRESTURL(ctx)
 	if err != nil {
@@ -329,12 +369,10 @@ func (d *RequestDeps) GetClient(ctx context.Context) (*gogithub.Client, error) {
 
 // GetGQLClient implements ToolDependencies.
 func (d *RequestDeps) GetGQLClient(ctx context.Context) (*githubv4.Client, error) {
-	// extract the token from the context
-	tokenInfo, ok := ghcontext.GetTokenInfo(ctx)
-	if !ok {
-		return nil, fmt.Errorf("no token info in context")
+	token, err := d.resolveUpstreamToken(ctx)
+	if err != nil {
+		return nil, err
 	}
-	token := tokenInfo.Token
 
 	// Construct GraphQL client
 	// We use NewEnterpriseClient unconditionally since we already parsed the API host
@@ -356,6 +394,14 @@ func (d *RequestDeps) GetGQLClient(ctx context.Context) (*githubv4.Client, error
 
 	gqlClient := githubv4.NewEnterpriseClient(graphqlURL.String(), gqlHTTPClient)
 	return gqlClient, nil
+}
+
+func (d *RequestDeps) resolveUpstreamToken(ctx context.Context) (string, error) {
+	if d.upstreamTokenResolver == nil {
+		return "", fmt.Errorf("no upstream token resolver configured")
+	}
+
+	return d.upstreamTokenResolver.ResolveUpstreamToken(ctx)
 }
 
 // GetRawClient implements ToolDependencies.

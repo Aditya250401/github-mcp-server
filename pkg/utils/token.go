@@ -40,36 +40,54 @@ var (
 // were 40 characters long and only contained the characters a-f and 0-9.
 var oldPatternRegexp = regexp.MustCompile(`\A[a-f0-9]{40}\z`)
 
-// ParseAuthorizationHeader parses the Authorization header from the HTTP request
-func ParseAuthorizationHeader(req *http.Request) (tokenType TokenType, token string, _ error) {
+// ParseBearerAuthorizationHeader parses the Authorization header into a bearer token.
+func ParseBearerAuthorizationHeader(req *http.Request) (string, error) {
 	authHeader := req.Header.Get(httpheaders.AuthorizationHeader)
 	if authHeader == "" {
-		return 0, "", ErrMissingAuthorizationHeader
+		return "", ErrMissingAuthorizationHeader
 	}
 
 	switch {
 	// decrypt dotcom token and set it as token
 	case strings.HasPrefix(authHeader, "GitHub-Bearer "):
-		return 0, "", ErrUnsupportedAuthorizationHeader
+		return "", ErrUnsupportedAuthorizationHeader
 	default:
 		// support both "Bearer" and "bearer" to conform to api.github.com
 		if len(authHeader) > 7 && strings.EqualFold(authHeader[:7], "Bearer ") {
-			token = authHeader[7:]
+			return authHeader[7:], nil
 		} else {
-			token = authHeader
+			return authHeader, nil
 		}
 	}
+}
 
+// ClassifyGitHubToken determines the GitHub token type for a parsed bearer token.
+func ClassifyGitHubToken(token string) (TokenType, error) {
 	for prefix, tokenType := range supportedGitHubPrefixes {
 		if strings.HasPrefix(token, prefix) {
-			return tokenType, token, nil
+			return tokenType, nil
 		}
 	}
 
 	matchesOldTokenPattern := oldPatternRegexp.MatchString(token)
 	if matchesOldTokenPattern {
-		return TokenTypePersonalAccessToken, token, nil
+		return TokenTypePersonalAccessToken, nil
 	}
 
-	return 0, "", ErrBadAuthorizationHeader
+	return 0, ErrBadAuthorizationHeader
+}
+
+// ParseAuthorizationHeader parses the Authorization header from the HTTP request.
+func ParseAuthorizationHeader(req *http.Request) (tokenType TokenType, token string, _ error) {
+	token, err := ParseBearerAuthorizationHeader(req)
+	if err != nil {
+		return 0, "", err
+	}
+
+	tokenType, err = ClassifyGitHubToken(token)
+	if err != nil {
+		return 0, "", err
+	}
+
+	return tokenType, token, nil
 }

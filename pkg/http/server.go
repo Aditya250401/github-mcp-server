@@ -154,8 +154,11 @@ func RunHTTPServer(cfg ServerConfig) error {
 
 	// Register OAuth protected resource metadata endpoints
 	oauthCfg := &oauth.Config{
-		BaseURL:      cfg.BaseURL,
-		ResourcePath: cfg.ResourcePath,
+		BaseURL:                cfg.BaseURL,
+		ResourcePath:           cfg.ResourcePath,
+		ResourceName:           "GitHub MCP Server",
+		ScopesSupported:        oauth.SupportedScopes,
+		BearerMethodsSupported: []string{"header"},
 	}
 
 	serverOptions := []HandlerOption{}

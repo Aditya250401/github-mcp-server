@@ -19,6 +19,7 @@ import (
 )
 
 type InventoryFactoryFunc func(r *http.Request) (*inventory.Inventory, error)
+type InventoryRequestFilter func(b *inventory.Builder, r *http.Request) *inventory.Builder
 
 // GitHubMCPServerFactoryFunc is a function type for creating a new MCP Server instance.
 // middleware are applied AFTER the default GitHub MCP Server middlewares (like error context injection)
@@ -35,15 +36,20 @@ type Handler struct {
 	inventoryFactoryFunc   InventoryFactoryFunc
 	oauthCfg               *oauth.Config
 	scopeFetcher           scopes.FetcherInterface
+	tokenExtractor         middleware.TokenExtractor
+	challengeWriter        middleware.ChallengeWriter
 	schemaCache            *mcp.SchemaCache
 }
 
 type HandlerOptions struct {
-	GitHubMcpServerFactory GitHubMCPServerFactoryFunc
-	InventoryFactory       InventoryFactoryFunc
-	OAuthConfig            *oauth.Config
-	ScopeFetcher           scopes.FetcherInterface
-	FeatureChecker         inventory.FeatureFlagChecker
+	GitHubMcpServerFactory  GitHubMCPServerFactoryFunc
+	InventoryFactory        InventoryFactoryFunc
+	OAuthConfig             *oauth.Config
+	ScopeFetcher            scopes.FetcherInterface
+	FeatureChecker          inventory.FeatureFlagChecker
+	TokenExtractor          middleware.TokenExtractor
+	ChallengeWriter         middleware.ChallengeWriter
+	InventoryRequestFilters []InventoryRequestFilter
 }
 
 type HandlerOption func(*HandlerOptions)
@@ -78,6 +84,24 @@ func WithFeatureChecker(checker inventory.FeatureFlagChecker) HandlerOption {
 	}
 }
 
+func WithTokenExtractor(extractor middleware.TokenExtractor) HandlerOption {
+	return func(o *HandlerOptions) {
+		o.TokenExtractor = extractor
+	}
+}
+
+func WithChallengeWriter(writer middleware.ChallengeWriter) HandlerOption {
+	return func(o *HandlerOptions) {
+		o.ChallengeWriter = writer
+	}
+}
+
+func WithInventoryRequestFilter(filter InventoryRequestFilter) HandlerOption {
+	return func(o *HandlerOptions) {
+		o.InventoryRequestFilters = append(o.InventoryRequestFilters, filter)
+	}
+}
+
 func NewHTTPMcpHandler(
 	ctx context.Context,
 	cfg *ServerConfig,
@@ -101,9 +125,26 @@ func NewHTTPMcpHandler(
 		scopeFetcher = scopes.NewFetcher(apiHost, scopes.FetcherOptions{})
 	}
 
+	tokenExtractor := opts.TokenExtractor
+	if tokenExtractor == nil {
+		tokenExtractor = middleware.DefaultTokenExtractor()
+	}
+
+	challengeWriter := opts.ChallengeWriter
+	if challengeWriter == nil {
+		challengeWriter = middleware.DefaultChallengeWriter(opts.OAuthConfig)
+	}
+
+	requestFilters := append([]InventoryRequestFilter(nil), opts.InventoryRequestFilters...)
+	if len(requestFilters) == 0 {
+		requestFilters = append(requestFilters, func(b *inventory.Builder, r *http.Request) *inventory.Builder {
+			return PATScopeFilter(b, r, scopeFetcher)
+		})
+	}
+
 	inventoryFactory := opts.InventoryFactory
 	if inventoryFactory == nil {
-		inventoryFactory = DefaultInventoryFactory(cfg, t, opts.FeatureChecker, scopeFetcher)
+		inventoryFactory = DefaultInventoryFactory(cfg, t, opts.FeatureChecker, requestFilters...)
 	}
 
 	// Create a shared schema cache to avoid repeated JSON schema reflection
@@ -121,13 +162,15 @@ func NewHTTPMcpHandler(
 		inventoryFactoryFunc:   inventoryFactory,
 		oauthCfg:               opts.OAuthConfig,
 		scopeFetcher:           scopeFetcher,
+		tokenExtractor:         tokenExtractor,
+		challengeWriter:        challengeWriter,
 		schemaCache:            schemaCache,
 	}
 }
 
 func (h *Handler) RegisterMiddleware(r chi.Router) {
 	r.Use(
-		middleware.ExtractUserToken(h.oauthCfg),
+		middleware.ExtractUserTokenWithOptions(h.tokenExtractor, h.challengeWriter),
 		middleware.WithRequestConfig,
 		middleware.WithMCPParse(),
 		middleware.WithPATScopes(h.logger, h.scopeFetcher),
@@ -240,7 +283,7 @@ func DefaultGitHubMCPServerFactory(r *http.Request, deps github.ToolDependencies
 // When the ServerConfig includes static flags (--toolsets, --read-only, etc.),
 // a static inventory is built once at factory creation to pre-filter the tool
 // universe. Per-request headers can only narrow within these bounds.
-func DefaultInventoryFactory(cfg *ServerConfig, t translations.TranslationHelperFunc, featureChecker inventory.FeatureFlagChecker, scopeFetcher scopes.FetcherInterface) InventoryFactoryFunc {
+func DefaultInventoryFactory(cfg *ServerConfig, t translations.TranslationHelperFunc, featureChecker inventory.FeatureFlagChecker, requestFilters ...InventoryRequestFilter) InventoryFactoryFunc {
 	// Build the static tool/resource/prompt universe from CLI flags.
 	// This is done once at startup and captured in the closure.
 	staticTools, staticResources, staticPrompts := buildStaticInventory(cfg, t, featureChecker)
@@ -287,7 +330,11 @@ func DefaultInventoryFactory(cfg *ServerConfig, t translations.TranslationHelper
 		}
 
 		b = InventoryFiltersForRequest(r, b)
-		b = PATScopeFilter(b, r, scopeFetcher)
+		for _, filter := range requestFilters {
+			if filter != nil {
+				b = filter(b, r)
+			}
+		}
 
 		b.WithServerInstructions()
 

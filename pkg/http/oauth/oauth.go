@@ -45,6 +45,18 @@ type Config struct {
 	// Defaults to GitHub's OAuth server if not specified.
 	AuthorizationServer string
 
+	// ResourceName is the human-readable resource name returned in PRM metadata.
+	// Defaults to "GitHub MCP Server" when empty.
+	ResourceName string
+
+	// ScopesSupported enumerates the scopes advertised in PRM metadata.
+	// Defaults to the package-level SupportedScopes when empty.
+	ScopesSupported []string
+
+	// BearerMethodsSupported enumerates the supported bearer methods in PRM metadata.
+	// Defaults to {"header"} when empty.
+	BearerMethodsSupported []string
+
 	// ResourcePath is the externally visible base path for the MCP server (e.g., "/mcp").
 	// This is used to restore the original path when a proxy strips a base path before forwarding.
 	// If empty, requests are treated as already using the external path.
@@ -120,13 +132,34 @@ func (h *AuthHandler) metadataHandler() http.Handler {
 		metadata := &oauthex.ProtectedResourceMetadata{
 			Resource:               resourceURL,
 			AuthorizationServers:   []string{authorizationServerURL},
-			ResourceName:           "GitHub MCP Server",
-			ScopesSupported:        SupportedScopes,
-			BearerMethodsSupported: []string{"header"},
+			ResourceName:           h.resourceName(),
+			ScopesSupported:        h.scopesSupported(),
+			BearerMethodsSupported: h.bearerMethodsSupported(),
 		}
 
 		auth.ProtectedResourceMetadataHandler(metadata).ServeHTTP(w, r)
 	})
+}
+
+func (h *AuthHandler) resourceName() string {
+	if h.cfg != nil && h.cfg.ResourceName != "" {
+		return h.cfg.ResourceName
+	}
+	return "GitHub MCP Server"
+}
+
+func (h *AuthHandler) scopesSupported() []string {
+	if h.cfg != nil && len(h.cfg.ScopesSupported) > 0 {
+		return append([]string(nil), h.cfg.ScopesSupported...)
+	}
+	return append([]string(nil), SupportedScopes...)
+}
+
+func (h *AuthHandler) bearerMethodsSupported() []string {
+	if h.cfg != nil && len(h.cfg.BearerMethodsSupported) > 0 {
+		return append([]string(nil), h.cfg.BearerMethodsSupported...)
+	}
+	return []string{"header"}
 }
 
 // routesForPattern generates route variants for a given pattern.

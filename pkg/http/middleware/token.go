@@ -11,6 +11,18 @@ import (
 )
 
 func ExtractUserToken(oauthCfg *oauth.Config) func(next http.Handler) http.Handler {
+	return ExtractUserTokenWithOptions(DefaultTokenExtractor(), DefaultChallengeWriter(oauthCfg))
+}
+
+func ExtractUserTokenWithOptions(extractor TokenExtractor, challenge ChallengeWriter) func(next http.Handler) http.Handler {
+	if extractor == nil {
+		extractor = DefaultTokenExtractor()
+	}
+
+	if challenge == nil {
+		challenge = DefaultChallengeWriter(nil)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -23,11 +35,11 @@ func ExtractUserToken(oauthCfg *oauth.Config) func(next http.Handler) http.Handl
 				return
 			}
 
-			tokenType, token, err := utils.ParseAuthorizationHeader(r)
+			tokenInfo, err := extractor.Extract(r)
 			if err != nil {
 				// For missing Authorization header, return 401 with WWW-Authenticate header per MCP spec
 				if errors.Is(err, utils.ErrMissingAuthorizationHeader) {
-					sendAuthChallenge(w, r, oauthCfg)
+					challenge.WriteUnauthorized(w, r)
 					return
 				}
 				// For other auth errors (bad format, unsupported), return 400
@@ -35,10 +47,7 @@ func ExtractUserToken(oauthCfg *oauth.Config) func(next http.Handler) http.Handl
 				return
 			}
 
-			ctx = ghcontext.WithTokenInfo(ctx, &ghcontext.TokenInfo{
-				Token:     token,
-				TokenType: tokenType,
-			})
+			ctx = ghcontext.WithTokenInfo(ctx, tokenInfo)
 			r = r.WithContext(ctx)
 
 			next.ServeHTTP(w, r)
