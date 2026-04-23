@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -94,9 +95,9 @@ type ServerConfig struct {
 	InsidersMode bool
 
 	// AuthSec, when non-nil and valid, enables AuthSec-backed token validation.
-	// Incoming bearer tokens are introspected against AuthSec and swapped for
-	// AuthSec.UpstreamGitHubToken before downstream GitHub API calls. OAuth
-	// Protected Resource Metadata advertises AuthSec.Issuer as the AS.
+	// In HTTP mode the generic AuthSec Go SDK becomes the canonical MCP
+	// protection layer and the GitHub MCP server only bridges the validated
+	// principal into its existing upstream GitHub token plumbing.
 	AuthSec *authsec.Config
 }
 
@@ -123,103 +124,15 @@ func RunHTTPServer(cfg ServerConfig) error {
 	logger := slog.New(slogHandler)
 	logger.Info("starting server", "version", cfg.Version, "host", cfg.Host, "lockdownEnabled", cfg.LockdownMode, "readOnly", cfg.ReadOnly, "insidersMode", cfg.InsidersMode)
 
-	apiHost, err := utils.NewAPIHost(cfg.Host)
+	handler, err := buildHTTPHandler(ctx, &cfg, t, logger)
 	if err != nil {
-		return fmt.Errorf("failed to parse API host: %w", err)
+		return err
 	}
-
-	repoAccessOpts := []lockdown.RepoAccessOption{
-		lockdown.WithLogger(logger.With("component", "lockdown")),
-	}
-	if cfg.RepoAccessCacheTTL != nil {
-		repoAccessOpts = append(repoAccessOpts, lockdown.WithTTL(*cfg.RepoAccessCacheTTL))
-	}
-
-	featureChecker := createHTTPFeatureChecker()
-
-	obs, err := observability.NewExporters(logger, metrics.NewNoopMetrics())
-	if err != nil {
-		return fmt.Errorf("failed to create observability exporters: %w", err)
-	}
-
-	deps := github.NewRequestDeps(
-		apiHost,
-		cfg.Version,
-		cfg.LockdownMode,
-		repoAccessOpts,
-		t,
-		cfg.ContentWindowSize,
-		featureChecker,
-		obs,
-	)
-
-	// Initialize the global tool scope map
-	err = initGlobalToolScopeMap(t)
-	if err != nil {
-		return fmt.Errorf("failed to initialize tool scope map: %w", err)
-	}
-
-	// Register OAuth protected resource metadata endpoints
-	oauthCfg := &oauth.Config{
-		BaseURL:                cfg.BaseURL,
-		ResourcePath:           cfg.ResourcePath,
-		ResourceName:           "GitHub MCP Server",
-		ScopesSupported:        oauth.SupportedScopes,
-		BearerMethodsSupported: []string{"header"},
-	}
-	// When AuthSec is enabled, point PRM at AuthSec and advertise AuthSec-side
-	// scopes instead of raw GitHub OAuth scopes.
-	if cfg.AuthSec.Enabled() {
-		oauthCfg.AuthorizationServer = cfg.AuthSec.Issuer
-		if len(cfg.AuthSec.RequiredScopes) > 0 {
-			oauthCfg.ScopesSupported = append([]string(nil), cfg.AuthSec.RequiredScopes...)
-		}
-	}
-
-	serverOptions := []HandlerOption{}
-	if cfg.ScopeChallenge {
-		scopeFetcher := scopes.NewFetcher(apiHost, scopes.FetcherOptions{})
-		serverOptions = append(serverOptions, WithScopeFetcher(scopeFetcher))
-	}
-	// Install AuthSec token extractor if configured.
-	if cfg.AuthSec.Enabled() {
-		extractor, err := authsec.NewTokenExtractor(cfg.AuthSec, logger)
-		if err != nil {
-			return fmt.Errorf("failed to create AuthSec token extractor: %w", err)
-		}
-		serverOptions = append(serverOptions, WithTokenExtractor(extractor))
-		logger.Info("AuthSec token validation enabled",
-			"issuer", cfg.AuthSec.Issuer,
-			"resource_uri", cfg.AuthSec.ResourceURI,
-			"resource_server_id", cfg.AuthSec.ResourceServerID)
-	}
-
-	r := chi.NewRouter()
-	handler := NewHTTPMcpHandler(ctx, &cfg, deps, t, logger, apiHost, append(serverOptions, WithFeatureChecker(featureChecker), WithOAuthConfig(oauthCfg))...)
-	oauthHandler, err := oauth.NewAuthHandler(oauthCfg, apiHost)
-	if err != nil {
-		return fmt.Errorf("failed to create OAuth handler: %w", err)
-	}
-
-	r.Group(func(r chi.Router) {
-		// Register Middleware First, needs to be before route registration
-		handler.RegisterMiddleware(r)
-
-		// Register MCP server routes
-		handler.RegisterRoutes(r)
-	})
-	logger.Info("MCP endpoints registered", "baseURL", cfg.BaseURL)
-
-	r.Group(func(r chi.Router) {
-		// Register OAuth protected resource metadata endpoints
-		oauthHandler.RegisterRoutes(r)
-	})
-	logger.Info("OAuth protected resource endpoints registered", "baseURL", cfg.BaseURL)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	httpSvr := http.Server{
 		Addr:              addr,
-		Handler:           r,
+		Handler:           handler,
 		ReadHeaderTimeout: 60 * time.Second,
 	}
 
@@ -245,6 +158,116 @@ func RunHTTPServer(cfg ServerConfig) error {
 
 	logger.Info("server stopped gracefully")
 	return nil
+}
+
+func buildHTTPHandler(ctx context.Context, cfg *ServerConfig, t translations.TranslationHelperFunc, logger *slog.Logger) (http.Handler, error) {
+	apiHost, err := utils.NewAPIHost(cfg.Host)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse API host: %w", err)
+	}
+
+	repoAccessOpts := []lockdown.RepoAccessOption{
+		lockdown.WithLogger(logger.With("component", "lockdown")),
+	}
+	if cfg.RepoAccessCacheTTL != nil {
+		repoAccessOpts = append(repoAccessOpts, lockdown.WithTTL(*cfg.RepoAccessCacheTTL))
+	}
+
+	featureChecker := createHTTPFeatureChecker()
+
+	obs, err := observability.NewExporters(logger, metrics.NewNoopMetrics())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create observability exporters: %w", err)
+	}
+
+	deps := github.NewRequestDeps(
+		apiHost,
+		cfg.Version,
+		cfg.LockdownMode,
+		repoAccessOpts,
+		t,
+		cfg.ContentWindowSize,
+		featureChecker,
+		obs,
+	)
+
+	if err := initGlobalToolScopeMap(t); err != nil {
+		return nil, fmt.Errorf("failed to initialize tool scope map: %w", err)
+	}
+
+	effectiveResourcePath := normalizeMountPath(cfg.ResourcePath)
+	if cfg.AuthSec != nil && cfg.AuthSec.Enabled() && effectiveResourcePath == "" {
+		effectiveResourcePath = "/mcp"
+	}
+	cfg.ResourcePath = effectiveResourcePath
+
+	oauthCfg := &oauth.Config{
+		BaseURL:                cfg.BaseURL,
+		ResourcePath:           cfg.ResourcePath,
+		ResourceName:           "GitHub MCP Server",
+		ScopesSupported:        oauth.SupportedScopes,
+		BearerMethodsSupported: []string{"header"},
+	}
+
+	serverOptions := []HandlerOption{
+		WithFeatureChecker(featureChecker),
+		WithOAuthConfig(oauthCfg),
+	}
+	if cfg.ScopeChallenge && !(cfg.AuthSec != nil && cfg.AuthSec.Enabled()) {
+		scopeFetcher := scopes.NewFetcher(apiHost, scopes.FetcherOptions{})
+		serverOptions = append(serverOptions, WithScopeFetcher(scopeFetcher))
+	}
+
+	handler := NewHTTPMcpHandler(ctx, cfg, deps, t, logger, apiHost, serverOptions...)
+
+	// AuthSec SDK mode owns metadata, bearer challenges, token validation, tool
+	// authorization, and tools/list filtering. The inner GitHub server only sees
+	// a bridged upstream GitHub credential and the validated principal.
+	if cfg.AuthSec != nil && cfg.AuthSec.Enabled() {
+		rt, err := authsec.NewSDKRuntime(cfg.AuthSec, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create AuthSec SDK runtime: %w", err)
+		}
+		metadataPath, err := cfg.AuthSec.MetadataPath()
+		if err != nil {
+			return nil, err
+		}
+
+		inner := chi.NewRouter()
+		handler.RegisterMiddleware(inner)
+		handler.RegisterRoutes(inner)
+
+		outer := chi.NewRouter()
+		outer.Handle(metadataPath, rt.ProtectedResourceHandler())
+		outer.Mount(cfg.ResourcePath, rt.Wrap(authsec.BridgeToGitHubContext(inner, cfg.AuthSec, logger)))
+
+		logger.Info("AuthSec SDK protection enabled",
+			"issuer", cfg.AuthSec.Issuer,
+			"resource_uri", cfg.AuthSec.ResourceURI,
+			"resource_server_id", cfg.AuthSec.ResourceServerID,
+			"mcp_path", cfg.ResourcePath,
+			"metadata_path", metadataPath)
+		return outer, nil
+	}
+
+	oauthHandler, err := oauth.NewAuthHandler(oauthCfg, apiHost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OAuth handler: %w", err)
+	}
+
+	r := chi.NewRouter()
+	r.Group(func(r chi.Router) {
+		handler.RegisterMiddleware(r)
+		handler.RegisterRoutes(r)
+	})
+	logger.Info("MCP endpoints registered", "baseURL", cfg.BaseURL)
+
+	r.Group(func(r chi.Router) {
+		oauthHandler.RegisterRoutes(r)
+	})
+	logger.Info("OAuth protected resource endpoints registered", "baseURL", cfg.BaseURL)
+
+	return r, nil
 }
 
 func initGlobalToolScopeMap(t translations.TranslationHelperFunc) error {
@@ -278,4 +301,15 @@ func createHTTPFeatureChecker() inventory.FeatureFlagChecker {
 		}
 		return false, nil
 	}
+}
+
+func normalizeMountPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || trimmed == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	return strings.TrimRight(trimmed, "/")
 }
