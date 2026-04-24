@@ -39,6 +39,12 @@ type Config struct {
 	// (fine-grained enforcement belongs inside tool handlers).
 	RequiredScopes []string
 
+	// ToolScopes carries the local inventory-derived MCP tool policy used to
+	// bootstrap the generic AuthSec SDK when the remote scope matrix is not yet
+	// available. This is populated by HTTP mode at runtime; operators do not set
+	// it directly.
+	ToolScopes map[string][]string
+
 	// HTTPClient is used for introspection. Defaults to a client with a 10s
 	// timeout when nil.
 	HTTPClient *http.Client

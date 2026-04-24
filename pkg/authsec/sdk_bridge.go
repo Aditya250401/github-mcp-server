@@ -16,6 +16,10 @@ import (
 // stable while making the SDK the canonical MCP protection layer.
 func (c *Config) SDKConfig(logger *slog.Logger) authsecsdk.Config {
 	issuer := strings.TrimRight(c.Issuer, "/")
+	policyMode := authsecsdk.PolicyModeRemoteRequired
+	if c.ToolScopes != nil {
+		policyMode = authsecsdk.PolicyModeRemoteWithLocalFallback
+	}
 
 	return authsecsdk.Config{
 		Issuer:                    issuer,
@@ -28,8 +32,9 @@ func (c *Config) SDKConfig(logger *slog.Logger) authsecsdk.Config {
 		ResourceName:              "GitHub MCP Server",
 		ResourceServerID:          c.ResourceServerID,
 		SupportedScopes:           append([]string(nil), c.RequiredScopes...),
+		ToolScopes:                authsecsdk.ToolScopeMap(c.ToolScopes),
 		ScopeMatrixTTL:            c.CacheTTL,
-		PolicyMode:                authsecsdk.PolicyModeRemoteRequired,
+		PolicyMode:                policyMode,
 		ValidationMode:            authsecsdk.ValidationModeJWTAndIntrospect,
 		HTTPClient:                c.HTTPClient,
 		Logger:                    logger,

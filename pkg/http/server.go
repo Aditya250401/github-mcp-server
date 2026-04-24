@@ -191,7 +191,8 @@ func buildHTTPHandler(ctx context.Context, cfg *ServerConfig, t translations.Tra
 		obs,
 	)
 
-	if err := initGlobalToolScopeMap(t); err != nil {
+	localToolScopes, err := initGlobalToolScopeMap(t)
+	if err != nil {
 		return nil, fmt.Errorf("failed to initialize tool scope map: %w", err)
 	}
 
@@ -224,6 +225,7 @@ func buildHTTPHandler(ctx context.Context, cfg *ServerConfig, t translations.Tra
 	// authorization, and tools/list filtering. The inner GitHub server only sees
 	// a bridged upstream GitHub credential and the validated principal.
 	if cfg.AuthSec != nil && cfg.AuthSec.Enabled() {
+		cfg.AuthSec.ToolScopes = localToolScopes
 		rt, err := authsec.NewSDKRuntime(cfg.AuthSec, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create AuthSec SDK runtime: %w", err)
@@ -270,20 +272,20 @@ func buildHTTPHandler(ctx context.Context, cfg *ServerConfig, t translations.Tra
 	return r, nil
 }
 
-func initGlobalToolScopeMap(t translations.TranslationHelperFunc) error {
+func initGlobalToolScopeMap(t translations.TranslationHelperFunc) (map[string][]string, error) {
 	// Build inventory with all tools to extract scope information
 	inv, err := inventory.NewBuilder().
 		SetTools(github.AllTools(t)).
 		Build()
 
 	if err != nil {
-		return fmt.Errorf("failed to build inventory for tool scope map: %w", err)
+		return nil, fmt.Errorf("failed to build inventory for tool scope map: %w", err)
 	}
 
 	// Initialize the global scope map
 	scopes.SetToolScopeMapFromInventory(inv)
 
-	return nil
+	return authsec.ToolScopesFromInventory(inv), nil
 }
 
 // createHTTPFeatureChecker creates a feature checker that reads header features from context

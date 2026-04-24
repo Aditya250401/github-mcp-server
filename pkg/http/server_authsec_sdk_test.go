@@ -124,13 +124,40 @@ func TestBuildHTTPHandler_AuthSecSDK_UsesScopePolicyEndpoint(t *testing.T) {
 	assert.GreaterOrEqual(t, policyCalls.Load(), int64(1))
 }
 
+func TestBuildHTTPHandler_AuthSecSDK_BootstrapsFromLocalFallbackWhenRemotePolicyUnavailable(t *testing.T) {
+	t.Parallel()
+
+	cfg, token, closeAuthSec := newAuthSecSDKServerConfigWithOptions(t, nil, "repo", http.StatusServiceUnavailable, nil)
+	defer closeAuthSec()
+
+	logger := testLogger()
+	tHelper, _ := translations.TranslationHelper()
+	handler, err := buildHTTPHandler(context.Background(), cfg, tHelper, logger)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	t.Logf("fallback tools/list response: code=%d body=%s", rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"search_repositories"`)
+}
+
 func newAuthSecSDKServerConfig(t *testing.T, policy map[string][]string) (*ServerConfig, string, func()) {
 	t.Helper()
 	var policyCalls atomic.Int64
-	return newAuthSecSDKServerConfigWithCounters(t, policy, &policyCalls)
+	return newAuthSecSDKServerConfigWithOptions(t, policy, "agent:read", http.StatusOK, &policyCalls)
 }
 
 func newAuthSecSDKServerConfigWithCounters(t *testing.T, policy map[string][]string, policyCalls *atomic.Int64) (*ServerConfig, string, func()) {
+	t.Helper()
+	return newAuthSecSDKServerConfigWithOptions(t, policy, "agent:read", http.StatusOK, policyCalls)
+}
+
+func newAuthSecSDKServerConfigWithOptions(t *testing.T, policy map[string][]string, tokenScope string, policyStatus int, policyCalls *atomic.Int64) (*ServerConfig, string, func()) {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -159,13 +186,19 @@ func newAuthSecSDKServerConfigWithCounters(t *testing.T, policy map[string][]str
 				"sub":    "user-123",
 				"iss":    authSecServer.URL,
 				"aud":    []string{"https://mcp.example.com/mcp"},
-				"scope":  "agent:read",
+				"scope":  tokenScope,
 			})
 		case "/authsec/resource-servers/rs-test/sdk-policy":
-			policyCalls.Add(1)
+			if policyCalls != nil {
+				policyCalls.Add(1)
+			}
 			user, pass, ok := r.BasicAuth()
 			if !ok || user != "rs-test" || pass != "secret-test" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if policyStatus != http.StatusOK {
+				http.Error(w, http.StatusText(policyStatus), policyStatus)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
