@@ -24,7 +24,7 @@ require (
 require github.com/golang-jwt/jwt/v5 v5.3.0
 
 require (
-	github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0
+	github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0-20260423235742-9d2a5e70835d
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
@@ -53,5 +53,3 @@ require (
 	golang.org/x/text v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/authsec-ai/sdk-authsec/packages/go-sdk => /Users/pc/Desktop/authnull/sdk-authsec/packages/go-sdk
