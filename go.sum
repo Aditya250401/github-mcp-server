@@ -1,5 +1,5 @@
-github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0-20260423235742-9d2a5e70835d h1:+ygCdbW8Tif62+v4PiP/p0I6QOgpqRsXQUYybR4bD2E=
-github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0-20260423235742-9d2a5e70835d/go.mod h1:50Qt93ceSVW17yLeh8ioH0cjqqoMs8SBNFKj9lnChOw=
+github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0-20260428024431-0b832e0e3ca4 h1:oO9Zucc95xVjaD2/n5pC/ZR9qZvs/nhRodoOHVR7ZYE=
+github.com/authsec-ai/sdk-authsec/packages/go-sdk v0.0.0-20260428024431-0b832e0e3ca4/go.mod h1:50Qt93ceSVW17yLeh8ioH0cjqqoMs8SBNFKj9lnChOw=
 github.com/aymerick/douceur v0.2.0 h1:Mv+mAeH1Q+n9Fr+oyamOlAkUNPWPlA8PPGR0QAaYuPk=
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
